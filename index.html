@@ -44,7 +44,11 @@ function buildSchedule(totalPages, chunkSize, members){
 
 /* ====================== KVDB.IO XOTIRA QATLAMI ====================== */
 async function createRoom(){
-  const res = await fetch(KVDB_BASE + "/", { method: "POST" });
+  const res = await fetch(KVDB_BASE + "/", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: "email=" + encodeURIComponent("khatm-" + Date.now() + "@example.com")
+  });
   if(!res.ok) throw new Error("Xona yaratilmadi");
   const id = (await res.text()).trim();
   return id;
