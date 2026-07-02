@@ -78,10 +78,24 @@ async function writeState(room, state){
 let ROOM = qs("room") || "";
 let STATE = null;
 let CURRENT_USER = localStorage.getItem("khatm-my-name") || "";
-let IS_ADMIN = false;
 let pollTimer = null;
 let notice = "";
 let errorMsg = "";
+ 
+const PENALTY_LABELS = { istigfor: "ta istig'for", salovat: "ta salovat", zikr: "ta zikr" };
+ 
+function chunkDueDate(day, createdAt){
+  const start = new Date(createdAt);
+  start.setHours(0,0,0,0);
+  const due = new Date(start);
+  due.setDate(start.getDate() + (day - 1));
+  return due;
+}
+function isOverdue(day, createdAt){
+  const due = chunkDueDate(day, createdAt);
+  const today = new Date(); today.setHours(0,0,0,0);
+  return today > due;
+}
  
 const app = document.getElementById("app");
  
@@ -145,9 +159,19 @@ function renderCreateScreen(){
           <input id="chunkSize" type="number" value="4" class="w-full bg-stone-800 border border-stone-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500">
         </div>
       </div>
-      <div>
-        <label class="block text-sm text-stone-300 mb-2">Ustoz (admin) uchun parol</label>
-        <input id="adminPass" type="text" placeholder="masalan: ustoz2026" class="w-full bg-stone-800 border border-stone-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500">
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-sm text-stone-300 mb-2">Kechikish jazosi turi</label>
+          <select id="penaltyType" class="w-full bg-stone-800 border border-stone-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500">
+            <option value="istigfor">Istig'for</option>
+            <option value="salovat">Salovat</option>
+            <option value="zikr">Zikr</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-sm text-stone-300 mb-2">Miqdori (har o'tkazib yuborilgan kun uchun)</label>
+          <input id="penaltyAmount" type="number" value="100" class="w-full bg-stone-800 border border-stone-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-amber-500">
+        </div>
       </div>
       <p id="createError" class="text-rose-400 text-sm hidden"></p>
       <button id="createBtn" class="w-full bg-amber-500 hover:bg-amber-400 text-stone-950 font-semibold rounded-lg py-2.5 transition-colors">Guruhni yaratish</button>
@@ -169,15 +193,15 @@ function renderCreateScreen(){
     const names = Array.from(memberInputs.querySelectorAll("input")).map(i=>i.value.trim()).filter(Boolean);
     const totalPages = Number(document.getElementById("totalPages").value);
     const chunkSize = Number(document.getElementById("chunkSize").value);
-    const adminPass = document.getElementById("adminPass").value.trim();
+    const penaltyType = document.getElementById("penaltyType").value;
+    const penaltyAmount = Number(document.getElementById("penaltyAmount").value) || 0;
     const errEl = document.getElementById("createError");
     if(names.length < 2){ errEl.textContent = "Kamida 2 ta ishtirokchi ismini kiriting."; errEl.classList.remove("hidden"); return; }
-    if(!adminPass){ errEl.textContent = "Ustoz uchun parol kiriting."; errEl.classList.remove("hidden"); return; }
     const chunks = buildSchedule(totalPages, chunkSize, names);
     if(chunks.length === 0){ errEl.textContent = "Sozlamalarni tekshiring."; errEl.classList.remove("hidden"); return; }
     const progress = {};
     chunks.forEach(c => progress[c.id] = { status:"unread", markedBy:null, markedAt:null });
-    const newState = { members:names, totalPages, chunkSize, adminPass, progress, createdAt:new Date().toISOString() };
+    const newState = { members:names, totalPages, chunkSize, penaltyType, penaltyAmount, progress, createdAt:new Date().toISOString() };
  
     document.getElementById("createBtn").textContent = "Yaratilmoqda...";
     try{
@@ -260,7 +284,8 @@ function renderMain(silent){
   const memberStats = STATE.members.map((name,i)=>{
     const own = chunks.filter(c=>c.memberIndex===i);
     const done = own.filter(c=>STATE.progress[c.id]?.status==="read").length;
-    return { name, total:own.length, done, pct: own.length ? Math.round((done/own.length)*100) : 0 };
+    const missed = own.filter(c=>STATE.progress[c.id]?.status!=="read" && isOverdue(c.day, STATE.createdAt)).length;
+    return { name, total:own.length, done, missed, pct: own.length ? Math.round((done/own.length)*100) : 0 };
   }).sort((a,b)=>b.pct-a.pct);
   const days = [...new Set(chunks.map(c=>c.day))].sort((a,b)=>a-b);
   const log = Object.entries(STATE.progress)
@@ -280,10 +305,8 @@ function renderMain(silent){
         <span class="text-stone-400">Siz:</span>
         <span class="text-amber-300 font-medium">${CURRENT_USER}</span>
         <button id="switchUser" class="text-stone-500 hover:text-stone-300 underline text-xs">almashtirish</button>
-        <span id="adminBadge"></span>
       </div>
     </div>
-    <div id="adminLoginBox"></div>
     <p id="errBox" class="mb-4 text-rose-400 text-sm ${errorMsg?"":"hidden"}">${errorMsg}</p>
     <p id="noticeBox" class="mb-4 text-amber-300 text-sm ${notice?"":"hidden"}">${notice}</p>
  
@@ -313,6 +336,7 @@ function renderMain(silent){
             <div class="h-1.5 bg-stone-900 rounded-full overflow-hidden">
               <div class="h-full rounded-full ${m.pct===100?"bg-emerald-500":"bg-emerald-700"}" style="width:${m.pct}%"></div>
             </div>
+            ${m.missed>0 ? `<div class="mt-2 text-[11px] text-rose-300">⚠ ${m.missed} kun o'tkazib yuborilgan — qarz: ${m.missed*STATE.penaltyAmount} ${PENALTY_LABELS[STATE.penaltyType]||""}</div>` : ""}
           </div>`).join("")}
       </div>
     </div>
@@ -320,7 +344,7 @@ function renderMain(silent){
     <div class="bg-stone-900/60 border border-stone-800 rounded-xl p-6 mb-6">
       <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
         <h2 class="font-serif text-lg text-stone-100">Kunlik jadval</h2>
-        <p class="text-xs text-stone-500">Yashil — o'qildi · Qizil — o'qilmadi</p>
+        <p class="text-xs text-stone-500">Yashil — o'qildi · Qizil — o'qilmadi · ⚠ — muddati o'tgan (jazo)</p>
       </div>
       <div class="overflow-x-auto">
         <table class="min-w-full border-separate border-spacing-1">
@@ -338,11 +362,13 @@ function renderMain(silent){
                   const cell = STATE.progress[chunk.id] || {};
                   const isRead = cell.status === "read";
                   const filledByOther = isRead && cell.markedBy !== memberName;
+                  const overdue = !isRead && isOverdue(chunk.day, STATE.createdAt);
                   return `<td>
-                    <button data-chunk="${chunk.id}" title="${isRead ? (cell.markedBy+" belgiladi · "+fmtDate(cell.markedAt)) : "Bosib o'qilgan deb belgilang"}"
-                      class="chunkBtn w-full min-w-[64px] rounded-md px-2 py-1.5 text-xs border transition-colors ${isRead ? "bg-emerald-700/80 border-emerald-500 text-emerald-50 hover:bg-emerald-600" : "bg-rose-950/70 border-rose-800 text-rose-200 hover:bg-rose-900"}">
+                    <button data-chunk="${chunk.id}" title="${isRead ? (cell.markedBy+" belgiladi · "+fmtDate(cell.markedAt)) : (overdue ? "Muddati o'tgan — jazo qo'llanadi" : "Bosib o'qilgan deb belgilang")}"
+                      class="chunkBtn w-full min-w-[64px] rounded-md px-2 py-1.5 text-xs border transition-colors ${isRead ? "bg-emerald-700/80 border-emerald-500 text-emerald-50 hover:bg-emerald-600" : overdue ? "bg-rose-900/80 border-rose-500 text-rose-100 hover:bg-rose-800 ring-1 ring-rose-500/50" : "bg-rose-950/70 border-rose-800 text-rose-200 hover:bg-rose-900"}">
                       <div class="font-medium">${chunk.start}-${chunk.end}</div>
                       ${filledByOther ? `<div class="text-[10px] opacity-80 truncate">↳ ${cell.markedBy}</div>` : ""}
+                      ${overdue ? `<div class="text-[10px] opacity-90">⚠ qarz</div>` : ""}
                     </button>
                   </td>`;
                 }).join("")}
@@ -369,7 +395,6 @@ function renderMain(silent){
       </div>
     </div>
  
-    <div id="adminPanel"></div>
   </div>`;
  
   // event bindings
@@ -381,51 +406,6 @@ function renderMain(silent){
   document.querySelectorAll(".chunkBtn").forEach(btn=>{
     btn.onclick = () => toggleChunk(btn.dataset.chunk);
   });
-  renderAdminBadge();
-  renderAdminPanel();
-}
- 
-function renderAdminBadge(){
-  const el = document.getElementById("adminBadge");
-  if(!el) return;
-  if(IS_ADMIN){
-    el.innerHTML = `<span class="ml-2 bg-amber-500/20 text-amber-300 border border-amber-600/40 rounded-full px-3 py-1 text-xs">Ustoz sifatida</span>`;
-  } else {
-    el.innerHTML = `<button id="adminLoginToggle" class="ml-2 text-stone-500 hover:text-amber-400 text-xs border border-stone-700 rounded-full px-3 py-1">Ustoz kirishi</button>`;
-    document.getElementById("adminLoginToggle").onclick = () => {
-      const box = document.getElementById("adminLoginBox");
-      box.innerHTML = `
-        <div class="mb-6 bg-stone-900/60 border border-stone-800 rounded-lg p-4 flex flex-wrap gap-2 items-center">
-          <input id="adminPassInput" type="password" placeholder="Ustoz paroli" class="bg-stone-800 border border-stone-700 rounded-lg px-3 py-2 text-sm flex-1 min-w-[160px]">
-          <button id="adminLoginBtn" class="bg-amber-500 hover:bg-amber-400 text-stone-950 rounded-lg px-4 py-2 text-sm font-medium">Kirish</button>
-        </div>`;
-      document.getElementById("adminLoginBtn").onclick = () => {
-        const val = document.getElementById("adminPassInput").value;
-        if(val === STATE.adminPass){ IS_ADMIN = true; box.innerHTML=""; renderAdminBadge(); renderAdminPanel(); }
-        else { errorMsg = "Parol noto'g'ri."; document.getElementById("errBox").textContent = errorMsg; document.getElementById("errBox").classList.remove("hidden"); }
-      };
-    };
-  }
-}
- 
-function renderAdminPanel(){
-  const el = document.getElementById("adminPanel");
-  if(!el) return;
-  if(!IS_ADMIN){ el.innerHTML=""; return; }
-  el.innerHTML = `
-    <div class="bg-amber-950/20 border border-amber-800/40 rounded-xl p-6">
-      <h2 class="font-serif text-lg text-amber-300 mb-4">Ustoz paneli</h2>
-      <div class="flex flex-wrap gap-3">
-        <button id="resetBtn" class="bg-rose-900/60 hover:bg-rose-800 border border-rose-700 text-rose-100 rounded-lg px-4 py-2 text-sm">Barcha belgilarni tozalash</button>
-        <button id="exitAdminBtn" class="bg-stone-800 hover:bg-stone-700 border border-stone-700 rounded-lg px-4 py-2 text-sm">Admin rejimidan chiqish</button>
-      </div>
-    </div>`;
-  document.getElementById("resetBtn").onclick = async () => {
-    if(!confirm("Barcha belgilar tozalanadi. Rostdan davom etasizmi?")) return;
-    Object.keys(STATE.progress).forEach(k=>{ STATE.progress[k] = { status:"unread", markedBy:null, markedAt:null }; });
-    await persist();
-  };
-  document.getElementById("exitAdminBtn").onclick = () => { IS_ADMIN = false; renderMain(); };
 }
  
 /* ====================== HARAKATLAR ====================== */
@@ -435,10 +415,10 @@ async function toggleChunk(chunkId){
   if(cell.status === "unread"){
     cell.status = "read"; cell.markedBy = CURRENT_USER; cell.markedAt = new Date().toISOString();
   } else {
-    if(cell.markedBy === CURRENT_USER || IS_ADMIN){
+    if(cell.markedBy === CURRENT_USER){
       cell.status = "unread"; cell.markedBy = null; cell.markedAt = null;
     } else {
-      notice = `Bu bo'lakni ${cell.markedBy} belgilagan. Faqat u yoki ustoz bekor qila oladi.`;
+      notice = `Bu bo'lakni ${cell.markedBy} belgilagan. Faqat o'zi bekor qila oladi.`;
       renderMain();
       setTimeout(()=>{ notice=""; }, 3000);
       return;
